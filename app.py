@@ -184,6 +184,36 @@ if st.button("Generate Acquittance Roll"):
             
         if all_data:
             df = pd.DataFrame(all_data)
+            
+            # --- SORTING LOGIC ---
+            # Master order array to ensure correct ledger hierarchy
+            master_order = [
+                "J.Sarkar, HM",
+                "S.K.Paul, A.T",
+                "B.Mondal, A.T",
+                "B.Das, A.T",
+                "B.Biswas, A.T",
+                "S.Mallick, A.T",
+                "B.Mukherjee, A.T",
+                "P.Mondal, A.T",
+                "A.Biswas, A.T",
+                "S.N.Roy, A.T",
+                "S.Ghosh, A.T",
+                "S.Konar, A.T",
+                "P.Konar, CLERK"
+            ]
+            
+            def get_rank(name):
+                try:
+                    return master_order.index(name)
+                except ValueError:
+                    return 999 # Unlisted names drop to the bottom
+            
+            # Apply sorting and rebuild index
+            df['Rank'] = df['Name'].apply(get_rank)
+            df = df.sort_values(by='Rank').drop(columns=['Rank']).reset_index(drop=True)
+            # ---------------------
+
             st.session_state.df_preview = df
             st.session_state.pdf_buffer = generate_acquittance_pdf(df)
             st.success("PDF Generated Successfully!")
