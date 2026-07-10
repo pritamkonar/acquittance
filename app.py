@@ -36,7 +36,7 @@ def format_khata_name(row_text):
     return f"{formatted_name}, {desig}"
 
 def extract_salary_data(pdf_file):
-    """Extracts data including PFL, automatically handling SSA/Non-SSA formatting."""
+    """Extracts data using self-healing math to fix PDF column shifts."""
     extracted_data = []
     
     with pdfplumber.open(pdf_file) as pdf:
@@ -60,7 +60,7 @@ def extract_salary_data(pdf_file):
                         tokens = row_text.split()
                         
                         try:
-                            # Anchor point: Gross salary always ends in '.00' in i-OSMS
+                            # Anchor point: Gross salary always ends in '.00'
                             gross_idx = next(i for i, t in enumerate(tokens) if re.match(r'^\d+\.00$', t))
                         except StopIteration:
                             continue 
@@ -77,15 +77,57 @@ def extract_salary_data(pdf_file):
                             gpf = tokens[gross_idx + 1]
                             net = tokens[-1] 
                             
-                            # SSA and Non-SSA arrange PFL, PTax, and ITax differently
+                            # --- SELF-HEALING TAX EXTRACTION ---
+                            # Ledger Math: Total Taxes = Gross - GPF - Net
+                            gross_val = int(gross)
+                            gpf_val = int(gpf)
+                            net_val = int(net)
+                            remainder = gross_val - gpf_val - net_val
+                            
+                            # Grab whatever numbers exist between GPF and Net
+                            deduc_tokens = tokens[gross_idx+2 : -1]
+                            clean_deducs = []
+                            for d in deduc_tokens:
+                                nums = re.findall(r'\d+', d)
+                                clean_deducs.append(nums[0] if nums else '0')
+                                    
+                            while len(clean_deducs) < 4:
+                                clean_deducs.append('0')
+                                
                             if is_ssa:
-                                ptax = tokens[gross_idx + 2]
-                                itax = tokens[gross_idx + 3]
-                                pfl = tokens[gross_idx + 5]
+                                raw_ptax, raw_itax, raw_cpf, raw_pfl = clean_deducs[:4]
                             else:
-                                pfl = tokens[gross_idx + 2]
-                                ptax = tokens[gross_idx + 4]
-                                itax = tokens[gross_idx + 5]
+                                raw_pfl, raw_cpf, raw_ptax, raw_itax = clean_deducs[:4]
+                                
+                            ptax_val = int(raw_ptax)
+                            itax_val = int(raw_itax)
+                            pfl_val = int(raw_pfl)
+                            
+                            # Verify if the extracted tokens match the true ledger math
+                            if ptax_val + itax_val + pfl_val != remainder:
+                                # PDF shifted columns. Auto-correcting based on remainder.
+                                if remainder in [150, 200]:
+                                    ptax_val = remainder
+                                    itax_val = 0
+                                    pfl_val = 0
+                                else:
+                                    ints = [int(x) for x in clean_deducs]
+                                    if 200 in ints: ptax_val = 200
+                                    elif 150 in ints: ptax_val = 150
+                                    else: ptax_val = 0
+                                    
+                                    itax_val = remainder - ptax_val
+                                    pfl_val = 0
+                            else:
+                                # The sum is correct, but check if PDF swapped PT and IT (e.g., S.Ghosh)
+                                if ptax_val == 0 and itax_val in [150, 200] and remainder in [150, 200]:
+                                    ptax_val = itax_val
+                                    itax_val = 0
+                                    
+                            ptax = str(ptax_val)
+                            itax = str(itax_val)
+                            pfl = str(pfl_val)
+                            # -----------------------------------
                                 
                             extracted_data.append({
                                 "Name": name_str,
@@ -121,12 +163,10 @@ def generate_acquittance_pdf(df):
         "Gross\nAmount", "G.P.F", "P.F.L", "Prof.\nTax", "Income\nTax", "Net Amount\nPayable"
     ]]
     
-    # Initialize dictionary to calculate totals
     cols_to_sum = ['Basic', 'DA', 'HRA', 'MA', 'Gross', 'GPF', 'PFL', 'PTax', 'ITax', 'Net']
     totals = {col: 0 for col in cols_to_sum}
     
     for idx, row in df.iterrows():
-        # Safely convert strings to integers for the sum calculation
         for col in cols_to_sum:
             try:
                 val = int(float(str(row[col]).replace(',', '').strip()))
@@ -139,7 +179,6 @@ def generate_acquittance_pdf(df):
             row['Gross'], row['GPF'], row['PFL'], row['PTax'], row['ITax'], row['Net']
         ])
     
-    # Append the Totals Row
     table_data.append([
         "", "TOTAL", 
         str(totals['Basic']), str(totals['DA']), str(totals['HRA']), str(totals['MA']), 
@@ -147,7 +186,6 @@ def generate_acquittance_pdf(df):
         str(totals['ITax']), str(totals['Net'])
     ])
         
-    # Adjusted column widths to perfectly fit A4 width without the Signature column
     col_widths = [25, 95, 45, 40, 40, 35, 55, 40, 40, 40, 45, 65]
     pdf_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     
@@ -163,7 +201,6 @@ def generate_acquittance_pdf(df):
         ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white]),
-        # Styling specifically for the newly added TOTAL row
         ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
         ('BACKGROUND', (0, -1), (-1, -1), colors.whitesmoke)
     ])
@@ -172,7 +209,6 @@ def generate_acquittance_pdf(df):
         style.add('BOTTOMPADDING', (0, i), (-1, i), 15)
         style.add('TOPPADDING', (0, i), (-1, i), 15)
         
-    # Standard padding for the bottom total row
     style.add('BOTTOMPADDING', (0, -1), (-1, -1), 8)
     style.add('TOPPADDING', (0, -1), (-1, -1), 8)
         
