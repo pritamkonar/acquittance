@@ -8,17 +8,21 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
-def format_khata_name(full_name):
-    """Converts 'JOYDIP SARKAR (HM)' to 'J.Sarkar, HM'"""
-    clean_name = str(full_name).replace('\n', ' ').strip()
-    match = re.search(r'([A-Z\s]+)\s*\(([A-Z0-9]+)\)', clean_name)
+def format_khata_name(row_text):
+    """Extracts and formats names like 'BIPLAB MUKHERJEE (AT)' into 'B.Mukherjee, A.T' directly from the raw row text."""
+    # This regex looks specifically for letters/spaces, followed by parentheses, ignoring numbers.
+    match = re.search(r'([A-Za-z\s]+)\s*\(\s*([A-Za-z0-9]+)\s*\)', row_text)
     
     if not match:
-        return clean_name
+        return "Unknown"
         
     name_part, desig = match.groups()
-    parts = name_part.strip().split()
+    name_part = name_part.strip()
+    parts = name_part.split()
     
+    if not parts:
+        return "Unknown"
+        
     if len(parts) == 1:
         formatted_name = f"{parts[0].capitalize()}"
     else:
@@ -26,7 +30,7 @@ def format_khata_name(full_name):
         surname = parts[-1].capitalize()
         formatted_name = f"{initials}{surname}"
         
-    desig = desig.upper()
+    desig = desig.upper().strip()
     if desig == "AT":
         desig = "A.T"
         
@@ -37,22 +41,25 @@ def extract_salary_data(pdf_file):
     extracted_data = []
     
     with pdfplumber.open(pdf_file) as pdf:
-        # --- Auto-Detect SSA vs Non-SSA ---
-        first_page_text = pdf.pages[0].extract_text()
-        is_ssa = False # Default assumption
+        # --- Robust Auto-Detect SSA vs Non-SSA ---
+        first_page_text = pdf.pages[0].extract_text() or ""
+        # Clean the text: remove all newlines and multiple spaces, then uppercase
+        clean_header_text = re.sub(r'\s+', ' ', first_page_text).upper()
         
-        if "(NON-SSA SCHOOL)" in first_page_text:
+        is_ssa = False # Default assumption
+        if "NON-SSA" in clean_header_text:
             is_ssa = False
-        elif "(SSA SCHOOL)" in first_page_text:
+        elif "SSA" in clean_header_text:
             is_ssa = True
         else:
             st.warning(f"Could not definitively detect SSA/Non-SSA in {pdf_file.name}. Defaulting to Non-SSA logic.")
-        # ----------------------------------
+        # -----------------------------------------
 
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
                 for row in table:
+                    # Identify valid employee rows by checking if the first column is a Serial Number
                     if row and row[0] and str(row[0]).strip().isdigit():
                         row_text = " ".join([str(cell).replace('\n', ' ').strip() for cell in row if cell is not None])
                         tokens = row_text.split()
@@ -64,15 +71,17 @@ def extract_salary_data(pdf_file):
                             continue 
                             
                         try:
-                            name_match = re.search(r'([A-Z\s]+)\s*\(([A-Z0-9]+)\)', row_text)
-                            raw_name = name_match.group(0) if name_match else "Unknown"
+                            # Safely extract and format Name
+                            name_str = format_khata_name(row_text)
                             
+                            # Navigate backward from Gross Amount for allowances
                             basic = tokens[gross_idx - 10]
                             da = tokens[gross_idx - 7]
                             hra = tokens[gross_idx - 6]
                             ma = tokens[gross_idx - 5]
                             gross = tokens[gross_idx].replace('.00', '')
                             
+                            # Navigate forward from Gross Amount for deductions
                             gpf = tokens[gross_idx + 1]
                             net = tokens[-1] 
                             
@@ -85,7 +94,7 @@ def extract_salary_data(pdf_file):
                                 itax = tokens[gross_idx + 5]
                                 
                             extracted_data.append({
-                                "Name": format_khata_name(raw_name),
+                                "Name": name_str,
                                 "Basic": basic,
                                 "DA": da,
                                 "HRA": hra,
@@ -162,7 +171,6 @@ if "pdf_buffer" not in st.session_state:
 if "df_preview" not in st.session_state:
     st.session_state.df_preview = None
 
-# Single uploader that accepts multiple files
 uploaded_files = st.file_uploader("Upload Requisition PDFs", type="pdf", accept_multiple_files=True)
 
 if st.button("Generate Acquittance Roll"):
@@ -171,7 +179,6 @@ if st.button("Generate Acquittance Roll"):
     if not uploaded_files:
         st.error("Please upload at least one Requisition PDF.")
     else:
-        # Loop through all uploaded files and let the script figure out what they are
         for file in uploaded_files:
             all_data.extend(extract_salary_data(file))
             
