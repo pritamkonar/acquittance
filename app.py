@@ -9,8 +9,7 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
 def format_khata_name(row_text):
-    """Extracts and formats names like 'BIPLAB MUKHERJEE (AT)' into 'B.Mukherjee, A.T' directly from the raw row text."""
-    # This regex looks specifically for letters/spaces, followed by parentheses, ignoring numbers.
+    """Extracts and formats names like 'BIPLAB MUKHERJEE (AT)' into 'B.Mukherjee, A.T'."""
     match = re.search(r'([A-Za-z\s]+)\s*\(\s*([A-Za-z0-9]+)\s*\)', row_text)
     
     if not match:
@@ -37,29 +36,25 @@ def format_khata_name(row_text):
     return f"{formatted_name}, {desig}"
 
 def extract_salary_data(pdf_file):
-    """Extracts data and automatically detects if the file is SSA or Non-SSA."""
+    """Extracts data including PFL, automatically handling SSA/Non-SSA formatting."""
     extracted_data = []
     
     with pdfplumber.open(pdf_file) as pdf:
-        # --- Robust Auto-Detect SSA vs Non-SSA ---
         first_page_text = pdf.pages[0].extract_text() or ""
-        # Clean the text: remove all newlines and multiple spaces, then uppercase
         clean_header_text = re.sub(r'\s+', ' ', first_page_text).upper()
         
-        is_ssa = False # Default assumption
+        is_ssa = False 
         if "NON-SSA" in clean_header_text:
             is_ssa = False
         elif "SSA" in clean_header_text:
             is_ssa = True
         else:
             st.warning(f"Could not definitively detect SSA/Non-SSA in {pdf_file.name}. Defaulting to Non-SSA logic.")
-        # -----------------------------------------
 
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
                 for row in table:
-                    # Identify valid employee rows by checking if the first column is a Serial Number
                     if row and row[0] and str(row[0]).strip().isdigit():
                         row_text = " ".join([str(cell).replace('\n', ' ').strip() for cell in row if cell is not None])
                         tokens = row_text.split()
@@ -71,25 +66,24 @@ def extract_salary_data(pdf_file):
                             continue 
                             
                         try:
-                            # Safely extract and format Name
                             name_str = format_khata_name(row_text)
                             
-                            # Navigate backward from Gross Amount for allowances
                             basic = tokens[gross_idx - 10]
                             da = tokens[gross_idx - 7]
                             hra = tokens[gross_idx - 6]
                             ma = tokens[gross_idx - 5]
                             gross = tokens[gross_idx].replace('.00', '')
                             
-                            # Navigate forward from Gross Amount for deductions
                             gpf = tokens[gross_idx + 1]
                             net = tokens[-1] 
                             
-                            # Apply the correct tax logic based on auto-detection
+                            # SSA and Non-SSA arrange PFL, PTax, and ITax differently
                             if is_ssa:
                                 ptax = tokens[gross_idx + 2]
                                 itax = tokens[gross_idx + 3]
+                                pfl = tokens[gross_idx + 5]
                             else:
+                                pfl = tokens[gross_idx + 2]
                                 ptax = tokens[gross_idx + 4]
                                 itax = tokens[gross_idx + 5]
                                 
@@ -101,6 +95,7 @@ def extract_salary_data(pdf_file):
                                 "MA": ma,
                                 "Gross": gross,
                                 "GPF": gpf,
+                                "PFL": pfl,
                                 "PTax": ptax,
                                 "ITax": itax,
                                 "Net": net
@@ -111,7 +106,7 @@ def extract_salary_data(pdf_file):
     return extracted_data
 
 def generate_acquittance_pdf(df):
-    """Generates a 1-page A4 PDF using ReportLab."""
+    """Generates a 1-page A4 PDF using ReportLab with a dynamic totals row."""
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=15, leftMargin=15, topMargin=30, bottomMargin=30)
     elements = []
@@ -123,16 +118,37 @@ def generate_acquittance_pdf(df):
     
     table_data = [[
         "Sl\nNo.", "Name", "Basic\nPay", "D.A", "H.R.A", "M.A", 
-        "Gross\nAmount", "G.P.F", "Prof.\nTax", "Income\nTax", "Net Amount\nPayable", "Signature"
+        "Gross\nAmount", "G.P.F", "P.F.L", "Prof.\nTax", "Income\nTax", "Net Amount\nPayable"
     ]]
     
+    # Initialize dictionary to calculate totals
+    cols_to_sum = ['Basic', 'DA', 'HRA', 'MA', 'Gross', 'GPF', 'PFL', 'PTax', 'ITax', 'Net']
+    totals = {col: 0 for col in cols_to_sum}
+    
     for idx, row in df.iterrows():
+        # Safely convert strings to integers for the sum calculation
+        for col in cols_to_sum:
+            try:
+                val = int(float(str(row[col]).replace(',', '').strip()))
+                totals[col] += val
+            except ValueError:
+                pass 
+                
         table_data.append([
             str(idx + 1), row['Name'], row['Basic'], row['DA'], row['HRA'], row['MA'],
-            row['Gross'], row['GPF'], row['PTax'], row['ITax'], row['Net'], ""
+            row['Gross'], row['GPF'], row['PFL'], row['PTax'], row['ITax'], row['Net']
         ])
+    
+    # Append the Totals Row
+    table_data.append([
+        "", "TOTAL", 
+        str(totals['Basic']), str(totals['DA']), str(totals['HRA']), str(totals['MA']), 
+        str(totals['Gross']), str(totals['GPF']), str(totals['PFL']), str(totals['PTax']), 
+        str(totals['ITax']), str(totals['Net'])
+    ])
         
-    col_widths = [25, 95, 45, 40, 40, 35, 55, 40, 35, 45, 60, 60]
+    # Adjusted column widths to perfectly fit A4 width without the Signature column
+    col_widths = [25, 95, 45, 40, 40, 35, 55, 40, 40, 40, 45, 65]
     pdf_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     
     style = TableStyle([
@@ -146,12 +162,19 @@ def generate_acquittance_pdf(df):
         ('FONTSIZE', (0, 1), (-1, -1), 8),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white])
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white]),
+        # Styling specifically for the newly added TOTAL row
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.whitesmoke)
     ])
     
-    for i in range(1, len(table_data)):
+    for i in range(1, len(table_data) - 1):
         style.add('BOTTOMPADDING', (0, i), (-1, i), 15)
         style.add('TOPPADDING', (0, i), (-1, i), 15)
+        
+    # Standard padding for the bottom total row
+    style.add('BOTTOMPADDING', (0, -1), (-1, -1), 8)
+    style.add('TOPPADDING', (0, -1), (-1, -1), 8)
         
     pdf_table.setStyle(style)
     elements.append(pdf_table)
@@ -186,7 +209,6 @@ if st.button("Generate Acquittance Roll"):
             df = pd.DataFrame(all_data)
             
             # --- SORTING LOGIC ---
-            # Master order array to ensure correct ledger hierarchy
             master_order = [
                 "J.Sarkar, HM",
                 "S.K.Paul, A.T",
@@ -207,9 +229,8 @@ if st.button("Generate Acquittance Roll"):
                 try:
                     return master_order.index(name)
                 except ValueError:
-                    return 999 # Unlisted names drop to the bottom
+                    return 999 
             
-            # Apply sorting and rebuild index
             df['Rank'] = df['Name'].apply(get_rank)
             df = df.sort_values(by='Rank').drop(columns=['Rank']).reset_index(drop=True)
             # ---------------------
